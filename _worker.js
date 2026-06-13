@@ -5,7 +5,7 @@ import { connect } from "cloudflare:sockets";
  * Handles real-time binary streams from remote sensor nodes.
  */
 
-const CURRENT_VERSION = "2.4.9";
+const CURRENT_VERSION = "2.5.0";
 
 const getAlpha = () => String.fromCharCode(118, 108, 101, 115, 115);
 const getBeta = () => String.fromCharCode(116, 114, 111, 106, 97, 110);
@@ -149,18 +149,35 @@ function trackUsage(uuid, bytes, env, ctx) {
         if (env && env.IOT_DB) {
             let changedConfig = false;
             if (sysConfig.users && sysConfig.users.length > 0) {
-                const initialLen = sysConfig.users.length;
-                sysConfig.users = sysConfig.users.filter(u => {
+                sysConfig.users.forEach(u => {
                     let uId = u.id.replace(/-/g, '').toLowerCase();
                     let sysU = sysUsageCache.users[uId];
-                    if (sysU) {
-                        if (u.limitTotalReq && sysU.reqs >= u.limitTotalReq) return false;
+                    if (!u.isPaused) {
+                        let reason = null;
+                        if (u.expiryMs && Date.now() > u.expiryMs) {
+                            reason = `Expiration date reached (${new Date(u.expiryMs).toLocaleDateString()})`;
+                        } else if (sysU && u.limitTotalReq && sysU.reqs >= u.limitTotalReq) {
+                            let usedGB = (sysU.reqs / 6000).toFixed(2);
+                            let limitGB = (u.limitTotalReq / 6000).toFixed(2);
+                            reason = `Traffic limit exceeded (${usedGB}GB / ${limitGB}GB)`;
+                        }
+                        if (reason) {
+                            u.isPaused = true;
+                            u.disabledReason = reason;
+                            u.disabledAt = Date.now();
+                            changedConfig = true;
+                            ctx?.waitUntil(logActivity(env, "User Auto-Disabled", `User "${u.name}" (${u.id}) disabled: ${reason}`).catch(()=>{}));
+                            if (sysConfig.tgToken && sysConfig.tgChatId) {
+                                const tgMsg = `⚠️ <b>User Auto-Disabled</b>\n\n👤 <b>User:</b> ${u.name}\n🆔 <b>ID:</b> <code>${u.id}</code>\n📝 <b>Reason:</b> ${reason}`;
+                                ctx?.waitUntil(fetch(`https://api.telegram.org/bot${sysConfig.tgToken}/sendMessage`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ chat_id: sysConfig.tgChatId, text: tgMsg, parse_mode: 'HTML' })
+                                }).catch(()=>{}));
+                            }
+                        }
                     }
-                    return true;
                 });
-                if (sysConfig.users.length !== initialLen) {
-                    changedConfig = true;
-                }
             }
             
             if (changedConfig) {
@@ -3257,10 +3274,10 @@ function getDashboardUI(hasDB) {
                           </div>
                       </div>
                       
-                      <!-- USERS VIEW -->
+                          <!-- USERS VIEW -->
                       <div id="view-users" class="hidden space-y-6">
                           <!-- Stats Grid -->
-                          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                          <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
                               <div class="bg-white dark:bg-darkcard rounded-3xl p-5 shadow-sm border border-slate-200 dark:border-darkborder relative overflow-hidden flex items-center justify-between">
                                   <div>
                                       <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block" data-i18n="stat_total_subscribers">Total Subscribers</span>
@@ -3288,6 +3305,35 @@ function getDashboardUI(hasDB) {
                                       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
                                   </div>
                               </div>
+                              <div class="bg-white dark:bg-darkcard rounded-3xl p-5 shadow-sm border border-slate-200 dark:border-darkborder relative overflow-hidden flex items-center justify-between">
+                                  <div>
+                                      <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider block" data-i18n="stat_auto_disabled">Auto-Disabled</span>
+                                      <span id="stat-auto-disabled" class="text-2xl font-black text-slate-800 dark:text-white mt-1 block">0</span>
+                                  </div>
+                                  <div class="p-3 bg-red-500/10 text-red-500 rounded-xl">
+                                      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"></path></svg>
+                                  </div>
+                              </div>
+                          </div>
+
+                          <!-- Recently Disabled Users Panel -->
+                          <div id="disabled-users-panel" class="hidden">
+                              <div class="bg-gradient-to-br from-red-50 to-orange-50 dark:from-red-950/30 dark:to-orange-950/30 rounded-3xl p-6 shadow-sm border border-red-200 dark:border-red-800/40 relative overflow-hidden">
+                                  <div class="flex items-center justify-between mb-4">
+                                      <div class="flex items-center gap-3">
+                                          <div class="p-2.5 bg-red-100 dark:bg-red-900/40 rounded-xl">
+                                              <svg class="w-5 h-5 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"></path></svg>
+                                          </div>
+                                          <div>
+                                              <h3 class="text-sm font-bold text-red-700 dark:text-red-300" data-i18n="disabled_panel_title">Recently Disabled Users</h3>
+                                              <p class="text-[11px] text-red-500/70 dark:text-red-400/60" data-i18n="disabled_panel_desc">Users automatically disabled due to quota or expiration limits</p>
+                                          </div>
+                                      </div>
+                                      <span id="disabled-panel-badge" class="px-3 py-1 bg-red-500 text-white text-xs font-bold rounded-full shadow-sm">0</span>
+                                  </div>
+                                  <div id="disabled-users-list" class="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                                  </div>
+                              </div>
                           </div>
 
                           <div class="bg-white dark:bg-darkcard rounded-3xl p-6 shadow-sm border border-slate-200 dark:border-darkborder relative overflow-hidden">
@@ -3297,6 +3343,12 @@ function getDashboardUI(hasDB) {
                                        <p class="text-xs text-slate-400 mt-1" data-i18n="sub_directory_desc">Search, modify bounds, toggle traffic limits or clear billing sessions.</p>
                                   </div>
                                   <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                                      <select id="user-status-filter" onchange="renderUsersTable()" class="bg-slate-50 dark:bg-darkbg border border-slate-200 dark:border-darkborder px-4 py-2.5 rounded-xl text-xs outline-none font-sans text-slate-600 dark:text-slate-400 focus:border-primary">
+                                          <option value="all" data-i18n="filter_all">All Users</option>
+                                          <option value="active" data-i18n="filter_active">Active</option>
+                                          <option value="paused" data-i18n="filter_paused">Paused</option>
+                                          <option value="auto-disabled" data-i18n="filter_auto_disabled">Auto-Disabled</option>
+                                      </select>
                                       <input type="text" id="user-search-input" onkeyup="renderUsersTable()" placeholder="🔍 Find by Name or UUID..." data-i18n="user_search_placeholder" class="bg-slate-50 dark:bg-darkbg border border-slate-200 dark:border-darkborder px-4 py-2.5 rounded-xl text-xs outline-none font-sans text-slate-600 dark:text-slate-400 focus:border-primary">
                                       <button onclick="document.getElementById('modal-add-user').classList.remove('hidden')" class="px-4 py-2.5 bg-primary hover:bg-primary/90 text-white rounded-xl text-xs font-bold transition-colors shadow-sm" data-i18n="btn_add_user">+ Add New User</button>
                                   </div>
@@ -3508,7 +3560,7 @@ function getDashboardUI(hasDB) {
                       </div>
                       <div>
                           <h3 class="text-lg font-black text-slate-800 dark:text-white" data-i18n="v_pop_title">Version Update</h3>
-                          <span class="text-[10px] font-bold px-2 py-0.5 bg-indigo-500 text-white rounded-full tracking-wide">v2.4.9</span>
+                          <span id="modal-version-badge" class="text-[10px] font-bold px-2 py-0.5 bg-indigo-500 text-white rounded-full tracking-wide"></span>
                       </div>
                   </div>
                   <button onclick="closeVersionModal()" class="text-slate-400 hover:text-slate-700 dark:hover:text-white bg-slate-50 dark:bg-slate-800 p-2 rounded-xl border border-slate-100 dark:border-darkborder transition-colors">
@@ -3521,17 +3573,10 @@ function getDashboardUI(hasDB) {
               <div class="space-y-4">
                   <div class="p-4 bg-slate-50 dark:bg-slate-800/30 rounded-2xl border border-slate-100 dark:border-darkborder/50">
                       <p class="text-xs font-bold text-slate-400 uppercase tracking-widest" data-i18n="v_pop_whatsnew">What's New in This Version</p>
-                      <h4 class="text-sm font-black text-slate-700 dark:text-white mt-1" data-i18n="v_pop_headline">Bug Fixes & Improvements</h4>
+                      <h4 id="modal-version-headline" class="text-sm font-black text-slate-700 dark:text-white mt-1"></h4>
                   </div>
                   
-                  <div class="space-y-4 max-h-[40vh] overflow-y-auto pe-2 text-start">
-                      <div class="flex gap-3">
-                          <div class="text-primary mt-1">✨</div>
-                          <div>
-                              <strong class="text-xs font-black text-slate-700 dark:text-slate-300" data-i18n="v_pop_b1_title">Add Custom Protocol-Port And Max Config For Users </strong>
-                          </div>
-                      
-                    </div>
+                  <div id="modal-changelog-container" class="space-y-4 max-h-[50vh] overflow-y-auto pe-2 text-start">
                   </div>
               </div>
 
@@ -3563,22 +3608,18 @@ function getDashboardUI(hasDB) {
                   limit_total: "Traffic (GB) Limit (Leave empty for unlimited)", limit_daily: "Daily Requests Limit (Leave empty for unlimited)",
                   limit_days: "Expiration limit (Days) - Leave empty for unlimited", edit_sub: "Edit Subscriber", lbl_name_ph: "Name or UUID",
                   btn_save_changes: "Save Changes", save_btn_user: "Save User", status_active: "Active", status_paused: "Paused", status_expired: "Expired",
-                  stat_total_subscribers: "Total Subscribers", stat_active_paused: "Active / Paused", stat_cumulative_traffic: "Cumulative Traffic",
+                  stat_total_subscribers: "Total Subscribers", stat_active_paused: "Active / Paused", stat_cumulative_traffic: "Cumulative Traffic", stat_auto_disabled: "Auto-Disabled",
                   sub_directory_title: "Subscriber Directory", sub_directory_desc: "Search, modify bounds, toggle traffic limits or clear billing sessions.", user_search_placeholder: "🔍 Find by Name or UUID...",
+                  filter_all: "All Users", filter_active: "Active", filter_paused: "Paused", filter_auto_disabled: "Auto-Disabled",
+                  disabled_panel_title: "Recently Disabled Users", disabled_panel_desc: "Users automatically disabled due to quota or expiration limits",
                   lbl_u_Protocol:"Protocol Mode (Leave empty to use global setting)",
                   lbl_u_ports:"Custom Ports (Optional - overrides global ports, comma separated e.g. 443,80",
                   lbl_u_max_config:"Max Configs",
                   login_password:"Password",
                   v_pop_title: "Release Notice", v_pop_whatsnew: "What's New", v_pop_headline: "New Features & Improvements",
-                  v_pop_b1_title: "Add Custom Protocol-Port And Max Config For Users",
-                  v_pop_b2_title: "",
-                  v_pop_b3_title: "",
-                  v_pop_b4_title: "",
-                  v_pop_b5_title: "",
-                  v_pop_b6_title: "",
-                  v_pop_b7_title: "",
                   v_pop_btn: "Got it!",
-                  changelog_title: "Release Notes & Changelog:"
+                  changelog_title: "Release Notes & Changelog:",
+                  changelog_added: "Added", changelog_fixed: "Fixed", changelog_improved: "Improved", changelog_changed: "Changed", changelog_note: "Important Notes",
               },
               fa: {
                   title: "دروازه نهان", pass_ph: "کلید اصلی", login_btn: "ورود به سیستم", err_pass: "دسترسی مسدود شد", missing_db: "⚠️ فضای پایگاه داده یافت نشد! تنظیمات ذخیره نمی‌شوند.",
@@ -3607,26 +3648,106 @@ function getDashboardUI(hasDB) {
                   limit_days: "مدت زمان اعتبار قانونی (روز) - برای نامحدود خالی بگذارید", edit_sub: "ویرایش مشترک", lbl_name_ph: "نام یا شناسه یکتا",
                   btn_save_changes: "ذخیره تغییرات", save_btn_user: "ثبت کاربر جدید", status_active: "فعال", status_paused: "متوقف شده", status_expired: "منقضی شده",
                   export_btn: "📥 برون‌بری فایل پیکربندی (نسخه پشتیبان)", import_btn: "📤 درون‌ریزی فایل پیکربندی (نسخه پشتیبان)",
-                  stat_total_subscribers: "کل مشترکین", stat_active_paused: "فعال / متوقف شده", stat_cumulative_traffic: "ترافیک کل انباشته",
+                  stat_total_subscribers: "کل مشترکین", stat_active_paused: "فعال / متوقف شده", stat_cumulative_traffic: "ترافیک کل انباشته", stat_auto_disabled: "غیرفعال خودکار",
                   sub_directory_title: "فهرست مشترکین", sub_directory_desc: "جستجو، اصلاح محدودیت‌ها، تغییر محدودیت‌های ترافیک یا پاک کردن جلسات حسابداری.", user_search_placeholder: "🔍 جستجو بر اساس نام یا شناسه...",
+                  filter_all: "همه کاربران", filter_active: "فعال", filter_paused: "متوقف شده", filter_auto_disabled: "غیرفعال خودکار",
+                  disabled_panel_title: "کاربران اخیراً غیرفعال شده", disabled_panel_desc: "کاربرانی که به دلیل اتمام سهمیه یا تاریخ انقضا غیرفعال شده‌اند",
                   lbl_u_Protocol:"نوع پروتکل(خالی بر اساس تنظیمات کلی)",
                   lbl_u_ports:"نوع پورت",
                   lbl_u_max_config:"حداکثر تعداد کانفیگ",
                   login_password:"رمز ورود",
                   v_pop_title: "اطلاعیه تعمیرات", v_pop_whatsnew: "ویژگی‌های جدید", v_pop_headline: "امکانات جدید و بهبودها",
-                  v_pop_b1_title: "اضافه شدن تنظیمات جدا برای هرکاربر(تعداد گانفیگ،پروتکل وپورت)",
-                  v_pop_b2_title: "",
-                  v_pop_b3_title: "",
-                  v_pop_b4_title: "",
-                  v_pop_b5_title: "",
-                  v_pop_b6_title: "",
-                  v_pop_b7_title: "",
                   v_pop_btn: "متوجه شدم!",
-                 
-                  changelog_title: "گزارش تغییرات و توضیحات نسخه جدید:"
+                  changelog_title: "گزارش تغییرات و توضیحات نسخه جدید:",
+                   changelog_added: "اضافه شده", changelog_fixed: "رفع شده", changelog_improved: "بهبود یافته", changelog_changed: "تغییر یافته", changelog_note: "نکات مهم",
+              }
+          };
+
+          const CHANGELOG_DATA = {
+              "2.5.0": {
+                  headline: { en: "User Auto-Disable & Management Improvements", fa: "غیرفعال‌سازی خودکار کاربر و بهبود مدیریت" },
+                  added: [
+                      { en: "Automatic user disable on traffic limit exceeded", fa: "غیرفعال‌سازی خودکار کاربر هنگام اتمام محدودیت ترافیک" },
+                      { en: "Automatic user disable on expiration date reached", fa: "غیرفعال‌سازی خودکار کاربر هنگام رسیدن به تاریخ انقضا" },
+                      { en: "Activity log and Telegram notification for auto-disabled users", fa: "ثبت در گزارش فعالیت و ارسال اعلان تلگرام برای کاربران غیرفعال شده خودکار" },
+                      { en: "Recently Disabled Users notification panel in Users tab", fa: "پنل اعلان کاربران اخیراً غیرفعال شده در بخش کاربران" },
+                      { en: "Status filter dropdown (All/Active/Paused/Auto-Disabled)", fa: "فیلتر وضعیت (همه/فعال/متوقف/غیرفعال خودکار)" },
+                      { en: "Auto-Disabled statistics card in dashboard", fa: "کارت آمار غیرفعال‌سازی خودکار در داشبورد" },
+                  ],
+                  fixed: [
+                      { en: "Expired users are now disabled instead of deleted", fa: "کاربران منقضی شده اکنون غیرفعال می‌شوند به جای حذف" },
+                      { en: "Users exceeding traffic limits are preserved in panel", fa: "کاربرانی که محدودیت ترافیک را رد می‌کنند در پنل حفظ می‌شوند" },
+                  ],
+                  improved: [
+                      { en: "User data, statistics, and history are now preserved", fa: "داده‌ها، آمار و تاریخچه کاربران اکنون حفظ می‌شود" },
+                      { en: "Account renewal workflow for administrators", fa: "فرآیند تمدید حساب برای مدیران" },
+                  ],
+                  notes: [
+                      { en: "Re-enabling a user clears the auto-disable reason", fa: "فعال‌سازی مجدد کاربر، دلیل غیرفعال‌سازی خودکار را پاک می‌کند" },
+                  ]
+              },
+              "2.4.9": {
+                  headline: { en: "Custom Protocol & Port Configuration", fa: "پیکربندی پروتکل و پورت سفارشی" },
+                  added: [
+                      { en: "Custom protocol mode per user (VLESS/Trojan/Both)", fa: "حالت پروتکل سفارشی برای هر کاربر (VLESS/Trojan/هر دو)" },
+                      { en: "Custom port configuration per user", fa: "پیکربندی پورت سفارشی برای هر کاربر" },
+                      { en: "Maximum configs limit per user", fa: "محدودیت حداکثر کانفیگ برای هر کاربر" },
+                  ],
+                  fixed: [],
+                  improved: [
+                      { en: "User management panel interface", fa: "رابط کاربری پنل مدیریت کاربران" },
+                  ],
+                  notes: []
               }
           };
   
+          function renderChangelog(version) {
+              const container = document.getElementById('modal-changelog-container');
+              if (!container) return;
+              
+              const data = CHANGELOG_DATA[version];
+              if (!data) {
+                  container.innerHTML = '<p class="text-slate-400 text-xs">No changelog available for this version.</p>';
+                  return;
+              }
+
+              const t = (key) => i18n[lang]?.[key] || i18n['en']?.[key] || key;
+              let html = '';
+
+              if (data.headline) {
+                  const headlineEl = document.getElementById('modal-version-headline');
+                  if (headlineEl) headlineEl.textContent = data.headline[lang] || data.headline['en'];
+              }
+
+              const sections = [
+                  { key: 'added', icon: '✨', color: 'emerald', items: data.added },
+                  { key: 'fixed', icon: '🔧', color: 'blue', items: data.fixed },
+                  { key: 'improved', icon: '⚡', color: 'violet', items: data.improved },
+                  { key: 'changed', icon: '🔄', color: 'amber', items: data.changed },
+                  { key: 'note', icon: '⚠️', color: 'red', items: data.notes },
+              ];
+
+              sections.forEach(section => {
+                  if (section.items && section.items.length > 0) {
+                      html += '<div class="mb-4">';
+                      html += '<div class="flex items-center gap-2 mb-2">';
+                      html += '<span class="text-sm">' + section.icon + '</span>';
+                      html += '<h5 class="text-xs font-bold text-' + section.color + '-600 dark:text-' + section.color + '-400 uppercase tracking-wider">' + t('changelog_' + section.key) + '</h5>';
+                      html += '</div>';
+                      html += '<div class="space-y-1.5 ps-6">';
+                      section.items.forEach(item => {
+                          html += '<div class="flex items-start gap-2">';
+                          html += '<span class="text-' + section.color + '-400 mt-1.5">•</span>';
+                          html += '<span class="text-xs text-slate-600 dark:text-slate-300">' + (item[lang] || item['en']) + '</span>';
+                          html += '</div>';
+                      });
+                      html += '</div></div>';
+                  }
+              });
+
+              container.innerHTML = html || '<p class="text-slate-400 text-xs">No changes documented.</p>';
+          }
+
           let lang = localStorage.getItem('lang') || 'fa';
           let sessionKey = "", baseRoute = window.location.pathname.split('/dash')[0];
           let hostName = window.location.hostname, localUUID = "";
@@ -3679,6 +3800,9 @@ function getDashboardUI(hasDB) {
               const popupKey = \`nahan_shown_v\${CURRENT_VERSION}\`;
               if (!localStorage.getItem(popupKey)) {
                   setTimeout(() => {
+                      const badge = document.getElementById('modal-version-badge');
+                      if (badge) badge.textContent = 'v' + CURRENT_VERSION;
+                      renderChangelog(CURRENT_VERSION);
                       const m = document.getElementById('modal-version-update');
                       if (m) {
                           m.classList.remove('hidden');
@@ -4134,6 +4258,7 @@ function getDashboardUI(hasDB) {
               let totalUsersVal = users.length;
               let activeSubscribers = users.filter(u => !u.isPaused && (!u.expiryMs || Date.now() <= u.expiryMs)).length;
               let pausedSubscribers = users.filter(u => u.isPaused).length;
+              let autoDisabledCount = users.filter(u => u.isPaused && u.disabledReason).length;
               let totalReqsSum = 0;
               users.forEach(u => {
                   let sysU = usage[u.id.replace(/-/g,'').toLowerCase()] || {reqs: 0};
@@ -4148,10 +4273,49 @@ function getDashboardUI(hasDB) {
               if (activeUsersEl) activeUsersEl.textContent = \`\${activeSubscribers} / \${pausedSubscribers}\`;
               const totalTrafficEl = document.getElementById('stat-total-traffic');
               if (totalTrafficEl) totalTrafficEl.textContent = \`\${totalGBSum} GB\`;
+              const autoDisabledEl = document.getElementById('stat-auto-disabled');
+              if (autoDisabledEl) autoDisabledEl.textContent = autoDisabledCount;
 
-              // Apply Search Filter
+              // Render Recently Disabled Users Panel
+              const disabledPanel = document.getElementById('disabled-users-panel');
+              const disabledList = document.getElementById('disabled-users-list');
+              const disabledBadge = document.getElementById('disabled-panel-badge');
+              if (disabledPanel && disabledList) {
+                  const autoDisabledUsers = users.filter(u => u.isPaused && u.disabledReason)
+                      .sort((a, b) => (b.disabledAt || 0) - (a.disabledAt || 0));
+                  if (autoDisabledUsers.length > 0) {
+                      disabledPanel.classList.remove('hidden');
+                      if (disabledBadge) disabledBadge.textContent = autoDisabledUsers.length;
+                      disabledList.innerHTML = autoDisabledUsers.map(u => {
+                          let timeStr = u.disabledAt ? new Date(u.disabledAt).toLocaleString() : '-';
+                          let reasonIcon = u.disabledReason.includes('Traffic') ? '📊' : (u.disabledReason.includes('Expiration') ? '📅' : '⚠️');
+                          let btnLabel = lang === 'fa' ? 'فعال‌سازی مجدد' : 'Re-enable';
+                          return \`
+                              <div class="flex items-center justify-between p-3 bg-white/70 dark:bg-slate-800/50 rounded-xl border border-red-100 dark:border-red-800/20 hover:shadow-md transition-shadow">
+                                  <div class="flex items-center gap-3 flex-1 min-w-0">
+                                      <div class="text-lg">\${reasonIcon}</div>
+                                      <div class="min-w-0">
+                                          <div class="text-sm font-bold text-slate-700 dark:text-slate-200 truncate">\${u.name}</div>
+                                          <div class="text-[11px] text-red-500 dark:text-red-400 font-medium">\${u.disabledReason}</div>
+                                          <div class="text-[10px] text-slate-400 mt-0.5">\${timeStr}</div>
+                                      </div>
+                                  </div>
+                                  <button onclick="togglePauseUser('\${u.id}')" class="ml-3 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-white text-[11px] font-bold rounded-lg shadow-sm transition-colors whitespace-nowrap">\${btnLabel}</button>
+                              </div>
+                          \`;
+                      }).join('');
+                  } else {
+                      disabledPanel.classList.add('hidden');
+                  }
+              }
+
+              // Apply Status Filter
+              const statusFilter = document.getElementById('user-status-filter')?.value || 'all';
               const searchVal = document.getElementById('user-search-input')?.value.toLowerCase().trim() || '';
               let filteredUsers = users.filter(u => {
+                  if (statusFilter === 'active' && (u.isPaused || (u.expiryMs && Date.now() > u.expiryMs))) return false;
+                  if (statusFilter === 'paused' && (!u.isPaused || u.disabledReason)) return false;
+                  if (statusFilter === 'auto-disabled' && !(u.isPaused && u.disabledReason)) return false;
                   return u.name.toLowerCase().includes(searchVal) || u.id.toLowerCase().includes(searchVal);
               });
 
@@ -4209,6 +4373,25 @@ function getDashboardUI(hasDB) {
 
                   let resetBtnHtml = \`<button onclick="resetUserTraffic('\${u.id}')" class="text-violet-500 hover:text-violet-700 bg-violet-50 hover:bg-violet-100 dark:bg-violet-900/30 dark:hover:bg-violet-800/50 p-2 rounded-lg" title="\${resetTitle}">🔄</button>\`;
 
+                  let isAutoDisabled = u.isPaused && u.disabledReason;
+                  let disableInfoHtml = '';
+                  if (isAutoDisabled) {
+                      let reasonLabel = u.disabledReason;
+                      let timeLabel = u.disabledAt ? new Date(u.disabledAt).toLocaleString() : '';
+                      let reasonTitle = lang === 'fa' ? 'علت غیرفعال‌سازی' : 'Disable Reason';
+                      let timeTitle = lang === 'fa' ? 'زمان غیرفعال‌سازی' : 'Disabled At';
+                      disableInfoHtml = \`
+                          <div class="mt-2 p-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/30">
+                              <div class="flex items-center gap-1.5 text-[10px] font-bold text-red-600 dark:text-red-400">
+                                  <span>⚠️</span>
+                                  <span>\${reasonTitle}:</span>
+                              </div>
+                              <div class="text-[10px] text-red-500 dark:text-red-300 mt-0.5">\${reasonLabel}</div>
+                              \${timeLabel ? \`<div class="text-[9px] text-slate-400 mt-1">\${timeTitle}: \${timeLabel}</div>\` : ''}
+                          </div>
+                      \`;
+                  }
+
                   let tr = document.createElement('tr');
                   tr.className = "hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors";
                   
@@ -4218,12 +4401,14 @@ function getDashboardUI(hasDB) {
                   }
 
                   tr.innerHTML = \`
-                      <td class="px-4 py-4 font-bold text-slate-700 dark:text-slate-300">\${u.name} \${u.isPaused ? '⏸️' : (isExp ? '🔴' : '🟢')}
+                      <td class="px-4 py-4 font-bold text-slate-700 dark:text-slate-300">\${u.name} \${u.isPaused ? (isAutoDisabled ? '🚫' : '⏸️') : (isExp ? '🔴' : '🟢')}
                           <div class="flex flex-wrap gap-1 mt-1">
+                              \${u.isPaused && u.disabledReason ? \`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-300">Auto-Disabled</span>\` : ''}
                               \${u.userMode ? \`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300">\${u.userMode === 'alpha' ? 'VLESS' : u.userMode === 'beta' ? 'Trojan' : 'VLESS+Trojan'}</span>\` : ''}
                               \${u.userPorts ? \`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-300">🔌 \${u.userPorts}</span>\` : ''}
                               \${u.maxConfigs ? \`<span class="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-300">max \${u.maxConfigs} cfgs</span>\` : ''}
                           </div>
+                          \${disableInfoHtml}
                       </td>
                       <td class="px-4 py-4 font-mono text-xs text-slate-500 select-all">\${u.id}</td>
                       <td class="px-4 py-4 text-slate-600 dark:text-slate-400 font-mono">
@@ -4299,6 +4484,10 @@ function getDashboardUI(hasDB) {
                   let usr = window.nahanConfig.users.find(u => u.id === uuid);
                   if (usr) {
                       usr.isPaused = !usr.isPaused;
+                      if (!usr.isPaused) {
+                          usr.disabledReason = null;
+                          usr.disabledAt = null;
+                      }
                       renderUsersTable();
                       doSaveDirectly();
                   }
