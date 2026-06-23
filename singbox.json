@@ -72,8 +72,12 @@
                 "server": "dns-direct"
             }
         ],
+        "final": "dns-remote",
         "strategy": "prefer_ipv4",
-        "independent_cache": true
+        "cache_capacity": 4096,
+        "optimistic": true,
+        "timeout": "10s",
+        "reverse_mapping": true
     },
     "inbounds": [
         {
@@ -82,10 +86,14 @@
             "address": [
                 "172.19.0.1/28"
             ],
+            "mtu": 9000,
+            "dns_mode": "hijack",
+            "dns_address": [
+                "172.19.0.2"
+            ],
             "auto_route": true,
             "strict_route": true,
-            "stack": "mixed",
-            "mtu": 9000
+            "stack": "mixed"
         },
         {
             "type": "mixed",
@@ -196,6 +204,7 @@
             }
         ],
         "auto_detect_interface": true,
+        "default_domain_resolver": "dns-direct",
         "final": "{{SELECTOR_TAG}}",
         "rule_set": [
             {
